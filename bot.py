@@ -296,7 +296,7 @@ def make_contest_embed(contest, is_new=False):
 
     embed = discord.Embed(
         title=f"{prefix} {contest['title']}"[:256],  # 임베드 제목은 최대 256자
-        url=f"https://allforyoung.com/recruit/{contest['id']}",
+        url=f"https://allforyoung.com/posts/{contest['id']}",
         color=discord.Color.green() if is_new else discord.Color.blue()
     )
     embed.add_field(
