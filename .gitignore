@@ -1,0 +1,5 @@
+.env
+contest.db
+.venv/
+__pycache__/
+temp.html

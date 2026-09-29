@@ -1,0 +1,5 @@
+discord.py>=2.7
+requests>=2.32
+python-dotenv>=1.0
+tzdata
+beautifulsoup4>=4.12
