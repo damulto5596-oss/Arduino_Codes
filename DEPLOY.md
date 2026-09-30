@@ -5,7 +5,7 @@
 ## 1. 파일 올리기 (내 PC에서)
 
 ```powershell
-scp -i <키파일> -r bot.py requirements.txt .env deploy ubuntu@<서버IP>:~/contest_alert/
+scp -i <키파일> -r bot.py main.py dorm_menu.py requirements.txt .env deploy ubuntu@<서버IP>:~/contest_alert/
 ```
 
 `.venv`, `contest.db`, `temp.html`은 올리지 않아도 됩니다. DB는 서버에서 처음 실행할 때 새로 만들어집니다.

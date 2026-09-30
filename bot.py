@@ -1,20 +1,18 @@
 import asyncio
 import logging
 import os
-import sqlite3
 import sys
 from datetime import datetime, timedelta
-from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import discord
-import requests
 from discord import app_commands
 from dotenv import load_dotenv
 
 import dorm_menu
-
-BASE_DIR = Path(__file__).resolve().parent
+from main import (
+    BASE_DIR, FETCH_COUNT, fetch_contests, get_setting, init_db,
+    load_all_contests, set_setting,
+)
 
 # .env 파일에서 설정 읽기 (실행 위치와 상관없이 bot.py 옆의 .env 사용)
 load_dotenv(BASE_DIR / ".env")
@@ -46,75 +44,20 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID") or 0) or None
 CONTEST_CHANNEL_KEY = "contest_channel"
 MENU_CHANNEL_KEY = "menu_channel"
 
-DB_PATH = Path(os.getenv("DB_PATH", BASE_DIR / "contest.db"))
-
 # 서버 시간대(보통 UTC)와 상관없이 한국 시간 기준으로 동작
-KST = ZoneInfo("Asia/Seoul")
+KST = dorm_menu.KST
 RUN_HOURS = [3, 9, 15, 21]
 MENU_HOURS = [8]        # 오늘의 식단을 보낼 시각 (KST)
 MENU_RETRY_COUNT = 3    # 식단 사이트 접속 실패 시 시도 횟수
 MENU_RETRY_DELAY = 300  # 재시도 간격 (초)
 
-REQUEST_TIMEOUT = 10  # 초
-FETCH_COUNT = 20      # /갱신 때 가져올 최신 공모전 수
 PAGE_SIZE = 4         # 한 페이지에 보여줄 공모전 수
 VIEW_TIMEOUT = 600    # 좌우 넘기기 버튼이 동작하는 시간 (초)
 
-intents = discord.Intents.default()
-
-client = discord.Client(intents=intents)
+client = discord.Client(intents=discord.Intents.default())
 tree = app_commands.CommandTree(client)
 
 guild = discord.Object(id=GUILD_ID)
-
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS contests (
-        id INTEGER PRIMARY KEY,
-        title TEXT NOT NULL,
-        dday TEXT,
-        organization TEXT,
-        poster_url TEXT,
-        thumbnail_url TEXT,
-        detected_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    # 예전 버전에서 만든 DB에는 없는 컬럼 추가
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(contests)")}
-    for column in ("organization", "poster_url", "thumbnail_url"):
-        if column not in columns:
-            conn.execute(f"ALTER TABLE contests ADD COLUMN {column} TEXT")
-
-    # 자동 알림 채널 등 봇 설정 저장용
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-    )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-def get_setting(key):
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-    conn.close()
-    return row[0] if row else None
-
-
-def set_setting(key, value):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-        (key, str(value))
-    )
-    conn.commit()
-    conn.close()
 
 
 def get_alert_channel(key):
@@ -128,161 +71,6 @@ def get_alert_channel(key):
     if not channel_id:
         return None
     return client.get_channel(int(channel_id))
-
-
-def fetch_period(contest_id):
-    """
-    상세 API에서 접수 기간(start_date ~ end_at)을 가져온다.
-    실패하면 None
-    """
-
-    try:
-        detail_res = requests.get(
-            f"https://api.allforyoung.com/api/v2/posts/{contest_id}/",
-            timeout=REQUEST_TIMEOUT
-        )
-        if detail_res.status_code != 200:
-            return None
-
-        detail_data = detail_res.json().get("data", {})
-        start_date = detail_data.get("start_date")
-        end_at = detail_data.get("end_at")
-
-        if start_date and end_at:
-            return f"{start_date} ~ {end_at}"
-        if end_at:
-            return f"~ {end_at}"
-    except Exception:
-        pass
-
-    return None
-
-
-def fetch_contests():
-    """
-    AllForYoung에서 최신 공모전 FETCH_COUNT개를 가져오고
-    새로운 공모전은 SQLite에 저장, 기존 공모전은 정보를 갱신한다.
-
-    반환값:
-        (최신 공모전 목록, 새로운 공모전 목록)
-    """
-
-    url = "https://api.allforyoung.com/api/v2/feed/"
-
-    params = {
-        "category": "공모전",
-        "tags": 28,
-        "order": "latest",
-        "page": 1,
-        "per_page": 24
-    }
-
-    response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-
-    data = response.json()
-
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    latest_contests = []
-    new_contests = []
-
-    posts = [item["data"] for item in data["data"] if item["type"] == "post"]
-
-    for contest_data in posts[:FETCH_COUNT]:
-
-        contest_id = contest_data["id"]
-        title = contest_data["title"]
-        dday = contest_data.get("dday", "정보 없음")
-
-        latest_contests.append(contest_data)
-
-        cursor.execute(
-            "SELECT dday FROM contests WHERE id = ?",
-            (contest_id,)
-        )
-
-        result = cursor.fetchone()
-
-        if result:
-            # 이미 저장된 공모전: 저장해 둔 접수 기간을 사용하고
-            # 주최/포스터 정보만 최신 값으로 갱신
-            saved_period = result[0]
-
-            if not saved_period:
-                # 예전 버전에서 접수 기간 없이 저장된 공모전이면 이번에 채워 넣음
-                saved_period = fetch_period(contest_id)
-
-            if saved_period:
-                contest_data['dday'] = saved_period
-
-            cursor.execute(
-                """
-                UPDATE contests
-                SET dday = ?, organization = ?, poster_url = ?, thumbnail_url = ?
-                WHERE id = ?
-                """,
-                (
-                    saved_period,
-                    contest_data.get("organization"),
-                    contest_data.get("poster_url"),
-                    contest_data.get("thumbnail_url"),
-                    contest_id
-                )
-            )
-            continue
-
-        # 상세 조회 실패 시 기존 feed의 dday (D-xx) 사용
-        dday = fetch_period(contest_id) or dday
-        contest_data['dday'] = dday
-
-        cursor.execute(
-            """
-            INSERT INTO contests (id, title, dday, organization, poster_url, thumbnail_url)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                contest_id,
-                title,
-                dday,
-                contest_data.get("organization"),
-                contest_data.get("poster_url"),
-                contest_data.get("thumbnail_url")
-            )
-        )
-
-        new_contests.append(contest_data)
-
-    cursor.execute("SELECT COUNT(*) FROM contests")
-    contest_count = cursor.fetchone()[0]
-
-    if contest_count > 35:
-        delete_count = contest_count - 35
-
-        cursor.execute("""
-        DELETE FROM contests
-        WHERE id IN (
-            SELECT id
-            FROM contests
-            ORDER BY detected_at ASC
-            LIMIT ?
-        )
-        """, (delete_count,))
-
-    conn.commit()
-    conn.close()
-
-    return latest_contests, new_contests
-
-
-def check_contests():
-    """
-    자동 알림용: 새로운 공모전 목록만 반환한다.
-    """
-
-    _, new_contests = fetch_contests()
-    return new_contests
 
 
 def make_contest_embed(contest, is_new=False):
@@ -417,6 +205,7 @@ async def send_contest_embeds(send, header, contests):
         content = header if i == 0 else None
         await send(content=content, embeds=embeds[i:i + 10])
 
+
 @client.event
 async def on_ready():
 
@@ -431,24 +220,6 @@ async def on_ready():
 
         asyncio.create_task(automatic_check())
         asyncio.create_task(automatic_menu())
-
-def load_all_contests():
-    """
-    DB에 저장된 공모전을 최신순으로 모두 가져온다.
-    """
-
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-
-    rows = conn.execute("""
-    SELECT id, title, dday, organization, poster_url, thumbnail_url
-    FROM contests
-    ORDER BY detected_at DESC, id DESC
-    """).fetchall()
-
-    conn.close()
-
-    return [dict(row) for row in rows]
 
 
 @tree.command(
@@ -613,6 +384,22 @@ def make_day_menu_embed(day, menu):
     return embed
 
 
+async def fetch_menu(interaction, label, getter, today):
+    """
+    /식단, /오늘 공통 처리: 응답을 미루고 식단을 가져온다.
+    실패하면 안내 메시지를 보내고 None을 반환한다.
+    """
+
+    await interaction.response.defer()
+
+    try:
+        return await asyncio.to_thread(getter, today)
+    except Exception:
+        log.exception(f"{label} 조회 중 오류")
+        await interaction.followup.send("❌ 식단을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+        return None
+
+
 @tree.command(
     name="식단",
     description="이번 주 기숙사 식단(점심/저녁)을 보여줍니다.",
@@ -620,15 +407,10 @@ def make_day_menu_embed(day, menu):
 )
 async def week_menu(interaction: discord.Interaction):
 
-    await interaction.response.defer()
-
     today = datetime.now(KST).date()
+    week = await fetch_menu(interaction, "/식단", dorm_menu.get_week_menu, today)
 
-    try:
-        week = await asyncio.to_thread(dorm_menu.get_week_menu, today)
-    except Exception:
-        log.exception("/식단 조회 중 오류")
-        await interaction.followup.send("❌ 식단을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+    if week is None:
         return
 
     if not week:
@@ -645,38 +427,35 @@ async def week_menu(interaction: discord.Interaction):
 )
 async def today_menu(interaction: discord.Interaction):
 
-    await interaction.response.defer()
-
     today = datetime.now(KST).date()
+    menu = await fetch_menu(interaction, "/오늘", dorm_menu.get_menu, today)
 
-    try:
-        menu = await asyncio.to_thread(dorm_menu.get_menu, today)
-    except Exception:
-        log.exception("/오늘 조회 중 오류")
-        await interaction.followup.send("❌ 식단을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
-        return
-
-    await interaction.followup.send(embed=make_day_menu_embed(today, menu))
+    if menu is not None:
+        await interaction.followup.send(embed=make_day_menu_embed(today, menu))
 
 
 def next_run_time(now, hours=RUN_HOURS):
+    today = now.replace(minute=0, second=0, microsecond=0)
+
     for hour in hours:
-        candidate = now.replace(
-            hour=hour,
-            minute=0,
-            second=0,
-            microsecond=0
-        )
+        candidate = today.replace(hour=hour)
 
         if candidate > now:
             return candidate
 
-    return now.replace(
-        hour=hours[0],
-        minute=0,
-        second=0,
-        microsecond=0
-    ) + timedelta(days=1)
+    return today.replace(hour=hours[0]) + timedelta(days=1)
+
+
+async def sleep_until_next(hours, label):
+    """다음 실행 시각(한국 시간 기준)까지 대기한다."""
+
+    now = datetime.now(KST)
+    next_run = next_run_time(now, hours)
+    wait_seconds = (next_run - now).total_seconds()
+
+    log.info(f"{label}: {next_run:%Y-%m-%d %H:%M} (KST), {wait_seconds / 3600:.2f}시간 후")
+
+    await asyncio.sleep(wait_seconds)
 
 
 async def automatic_check():
@@ -686,7 +465,7 @@ async def automatic_check():
     while not client.is_closed():
 
         try:
-            new_contests = await asyncio.to_thread(check_contests)
+            _, new_contests = await asyncio.to_thread(fetch_contests)
 
             if new_contests:
 
@@ -713,14 +492,7 @@ async def automatic_check():
 
             log.exception("자동 공모전 확인 오류")
 
-        # 다음 실행 시각(한국 시간 기준)까지 대기
-        now = datetime.now(KST)
-        next_run = next_run_time(now)
-        wait_seconds = (next_run - now).total_seconds()
-
-        log.info(f"다음 자동 검사: {next_run:%Y-%m-%d %H:%M} (KST), {wait_seconds / 3600:.2f}시간 후")
-
-        await asyncio.sleep(wait_seconds)
+        await sleep_until_next(RUN_HOURS, "다음 자동 검사")
 
 
 async def send_today_menu():
@@ -758,13 +530,7 @@ async def automatic_menu():
     while not client.is_closed():
 
         # 공모전 검사와 달리 봇 시작 직후에는 보내지 않고 다음 MENU_HOURS까지 대기
-        now = datetime.now(KST)
-        next_run = next_run_time(now, MENU_HOURS)
-        wait_seconds = (next_run - now).total_seconds()
-
-        log.info(f"다음 식단 알림: {next_run:%Y-%m-%d %H:%M} (KST), {wait_seconds / 3600:.2f}시간 후")
-
-        await asyncio.sleep(wait_seconds)
+        await sleep_until_next(MENU_HOURS, "다음 식단 알림")
 
         try:
             await send_today_menu()
