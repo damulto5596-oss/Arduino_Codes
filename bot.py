@@ -9,6 +9,7 @@ from discord import app_commands
 from dotenv import load_dotenv
 
 import dorm_menu
+import weather
 from main import (
     BASE_DIR, FETCH_COUNT, fetch_contests, get_setting, init_db,
     load_all_contests, set_setting,
@@ -43,6 +44,8 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID") or 0) or None
 # 자동 알림 채널을 settings 테이블에 저장할 때 쓰는 키
 CONTEST_CHANNEL_KEY = "contest_channel"
 MENU_CHANNEL_KEY = "menu_channel"
+WEATHER_CHANNEL_KEY = "weather_channel"
+WEATHER_LOCATION_KEY = "weather_location"  # 아침 알림에 쓸 기상청 지역 코드
 
 # 서버 시간대(보통 UTC)와 상관없이 한국 시간 기준으로 동작
 KST = dorm_menu.KST
@@ -218,6 +221,8 @@ async def on_ready():
         await tree.sync(guild=guild)
         log.info("Slash Command 동기화 완료")
 
+        # 지역 목록은 처음 한 번만 기상청에서 받아 파일에 저장 (자동완성에 필요)
+        asyncio.create_task(preload_zones())
         asyncio.create_task(automatic_check())
         asyncio.create_task(automatic_menu())
 
@@ -434,6 +439,122 @@ async def today_menu(interaction: discord.Interaction):
         await interaction.followup.send(embed=make_day_menu_embed(today, menu))
 
 
+async def preload_zones():
+    try:
+        await asyncio.to_thread(weather.load_zones)
+        log.info("날씨 지역 목록 준비 완료")
+    except Exception:
+        log.exception("날씨 지역 목록 준비 오류 (첫 /날씨 사용 시 다시 시도)")
+
+
+def make_weather_embed(name, day, rows):
+    """하루 날씨를 큰 흐름 / 기온 / 체감온도 3칸 임베드로 만든다."""
+
+    embed = discord.Embed(
+        title=f"🌤️ {name} 날씨 · {day_label(day)}",
+        color=discord.Color.teal()
+    )
+    embed.add_field(name="🌈 날씨 흐름", value=weather.format_flow(rows), inline=False)
+    embed.add_field(name="🌡️ 기온 변화", value=weather.format_series(rows, "temp"), inline=False)
+    embed.add_field(name="🥶 체감온도 변화", value=weather.format_series(rows, "feel"), inline=False)
+    embed.set_footer(text="출처: 기상청 날씨누리 · 동네예보 (3시간 간격)")
+
+    return embed
+
+
+async def build_weather_embed(zone):
+    """
+    지역의 오늘 날씨 임베드를 만든다. 예보가 없으면 None
+    실패하면 예외를 그대로 던진다.
+    """
+
+    today = datetime.now(KST).date()
+    rows = await asyncio.to_thread(weather.get_day_weather, zone["code"], today)
+    if not rows:
+        return None
+    return make_weather_embed(zone["name"], today, rows)
+
+
+async def zone_autocomplete(interaction: discord.Interaction, current: str):
+    # 자동완성은 3초 안에 답해야 해서 목록이 준비되지 않았으면 비워 둠
+    if not weather.zones_loaded():
+        return []
+    return [
+        app_commands.Choice(name=zone["name"][:100], value=zone["name"][:100])
+        for zone in weather.search_zones(current)
+    ]
+
+
+@tree.command(
+    name="날씨",
+    description="지역의 오늘 하루 날씨(09시~24시)를 보여줍니다.",
+    guild=guild
+)
+@app_commands.describe(위치="예: 상도동, 서울 동작구 (목록에서 고르면 정확해요)")
+@app_commands.autocomplete(위치=zone_autocomplete)
+async def weather_command(interaction: discord.Interaction, 위치: str):
+
+    await interaction.response.defer()
+
+    try:
+        zone = await asyncio.to_thread(weather.find_zone, 위치)
+        if zone is None:
+            await interaction.followup.send(f"❌ '{위치}' 지역을 찾지 못했습니다. 동네 이름(예: 상도동)으로 다시 입력해 주세요.")
+            return
+
+        embed = await build_weather_embed(zone)
+    except Exception:
+        log.exception("/날씨 조회 중 오류")
+        await interaction.followup.send("❌ 날씨를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+        return
+
+    if embed is None:
+        await interaction.followup.send(f"🌤️ {zone['name']}의 오늘 예보가 아직 없습니다.")
+        return
+
+    await interaction.followup.send(embed=embed)
+
+
+@tree.command(
+    name="위치설정",
+    description="아침 8시 식단과 함께 보낼 날씨의 위치를 설정합니다.",
+    guild=guild
+)
+@app_commands.describe(위치="예: 상도동, 서울 동작구 (목록에서 고르면 정확해요)")
+@app_commands.autocomplete(위치=zone_autocomplete)
+@app_commands.default_permissions(manage_guild=True)
+async def set_weather_location(interaction: discord.Interaction, 위치: str):
+
+    await interaction.response.defer()
+
+    try:
+        zone = await asyncio.to_thread(weather.find_zone, 위치)
+    except Exception:
+        log.exception("/위치설정 지역 검색 중 오류")
+        await interaction.followup.send("❌ 지역 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+        return
+
+    if zone is None:
+        await interaction.followup.send(f"❌ '{위치}' 지역을 찾지 못했습니다. 동네 이름(예: 상도동)으로 다시 입력해 주세요.")
+        return
+
+    set_setting(WEATHER_LOCATION_KEY, zone["code"])
+    log.info(f"날씨 위치 설정: {zone['name']} ({zone['code']}) by {interaction.user}")
+
+    await interaction.followup.send(f"✅ 이제 아침 날씨를 **{zone['name']}** 기준으로 보냅니다.")
+
+
+@tree.command(
+    name="날씨설정",
+    description="아침 날씨 자동 알림을 보낼 채널을 설정합니다.",
+    guild=guild
+)
+@app_commands.describe(채널이름="날씨 알림을 받을 채널")
+@app_commands.default_permissions(manage_guild=True)
+async def set_weather_channel(interaction: discord.Interaction, 채널이름: discord.TextChannel):
+    await set_alert_channel(interaction, WEATHER_CHANNEL_KEY, 채널이름, "날씨")
+
+
 def next_run_time(now, hours=RUN_HOURS):
     today = now.replace(minute=0, second=0, microsecond=0)
 
@@ -523,6 +644,48 @@ async def send_today_menu():
     log.info("오늘의 식단 전송 완료")
 
 
+async def send_today_weather():
+    """
+    /위치설정으로 정한 지역의 오늘 날씨를 날씨 알림 채널에 보낸다.
+    날씨 채널을 정하지 않았으면 식단 알림 채널로 보낸다.
+    """
+
+    code = get_setting(WEATHER_LOCATION_KEY)
+
+    if not code:
+        log.warning("날씨 위치가 설정되지 않았습니다. /위치설정으로 위치를 지정하세요.")
+        return
+
+    # 지역 이름은 목록에서 찾고, 목록을 못 받았으면 코드만 이름 대신 사용
+    zone = {"code": code, "name": None}
+
+    for attempt in range(1, MENU_RETRY_COUNT + 1):
+        try:
+            zone["name"] = await asyncio.to_thread(weather.zone_name, code) or code
+            embed = await build_weather_embed(zone)
+            break
+        except Exception:
+            log.exception(f"자동 날씨 조회 오류 ({attempt}/{MENU_RETRY_COUNT})")
+            if attempt == MENU_RETRY_COUNT:
+                return
+            await asyncio.sleep(MENU_RETRY_DELAY)
+
+    if embed is None:
+        log.warning(f"{zone['name']} 오늘 예보가 없어 날씨를 보내지 않습니다.")
+        return
+
+    channel = get_alert_channel(
+        WEATHER_CHANNEL_KEY if get_setting(WEATHER_CHANNEL_KEY) else MENU_CHANNEL_KEY
+    )
+
+    if channel is None:
+        log.warning("날씨 알림 채널을 찾을 수 없습니다. /날씨설정으로 채널을 지정하세요.")
+        return
+
+    await channel.send(embed=embed)
+    log.info("오늘의 날씨 전송 완료")
+
+
 async def automatic_menu():
 
     await client.wait_until_ready()
@@ -536,6 +699,12 @@ async def automatic_menu():
             await send_today_menu()
         except Exception:
             log.exception("자동 식단 알림 오류")
+
+        # 식단 전송이 실패해도 날씨는 따로 보냄
+        try:
+            await send_today_weather()
+        except Exception:
+            log.exception("자동 날씨 알림 오류")
 
 
 async def main():

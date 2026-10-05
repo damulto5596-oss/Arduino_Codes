@@ -3,3 +3,4 @@ contest.db
 .venv/
 __pycache__/
 temp.html
+weather_zones.json
