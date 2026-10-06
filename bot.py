@@ -468,8 +468,8 @@ def make_weather_embed(name, day, rows):
             name=weather.clock_label(row["time"]),
             # 짧게 써야 3칸이 한 줄에 들어간다 (길면 아래 줄로 밀림)
             value=(
-                f"### {weather.sky_emoji(row['sky'])} {row['sky']}\n\n"
-                f"**🌡️ {degree(row['temp'])}**\n\n"
+                f"### {weather.sky_emoji(row['sky'])} {row['sky']}\n"
+                f"**🌡️ {degree(row['temp'])}**\n"
                 f"**🥶 {degree(row['feel'])}**\n​"
             ),
             inline=True,
