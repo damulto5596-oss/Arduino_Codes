@@ -454,11 +454,11 @@ def make_weather_embed(name, day, rows):
         return "-" if value is None else f"{value}℃"
 
     temps = [row["temp"] for row in rows if row["temp"] is not None]
-    summary = f"🔺 최고 **{max(temps)}℃**  ·  🔻 최저 **{min(temps)}℃**" if temps else ""
+    summary = f"🔺 최고 {max(temps)}℃ · 🔻 최저 {min(temps)}℃" if temps else ""
 
     embed = discord.Embed(
         title=f"🌤️ {name} 날씨 · {day_label(day)}",
-        description=f"{summary}\n{weather.format_flow(rows)}",
+        description=f"## {summary}\n### {weather.format_flow(rows)}",
         color=discord.Color.teal()
     )
 
@@ -466,10 +466,11 @@ def make_weather_embed(name, day, rows):
     for row in rows:
         embed.add_field(
             name=weather.clock_label(row["time"]),
+            # 짧게 써야 3칸이 한 줄에 들어간다 (길면 아래 줄로 밀림)
             value=(
-                f"{weather.sky_emoji(row['sky'])} **{row['sky']}**\n"
-                f"> 🌡️ 기온　{degree(row['temp'])}\n"
-                f"> 🥶 체감　{degree(row['feel'])}"
+                f"### {weather.sky_emoji(row['sky'])} {row['sky']}\n"
+                f"**🌡️ {degree(row['temp'])}**\n"
+                f"**🥶 {degree(row['feel'])}**"
             ),
             inline=True,
         )

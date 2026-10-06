@@ -9,7 +9,7 @@ import json
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from zoneinfo import ZoneInfo
@@ -49,6 +49,9 @@ def _crawl_zones() -> list[dict]:
     def short(zone):
         return zone.get("shortName") or zone["name"]
 
+    def coords(zone):
+        return {"lat": zone.get("lat"), "lon": zone.get("lon")}
+
     wides = _get_zones(type="WIDE")
 
     def cities_of(wide):
@@ -68,7 +71,7 @@ def _crawl_zones() -> list[dict]:
 
     entries = []
     for wide in wides:
-        entries.append({"code": wide["code"], "name": wide["name"], "key": short(wide)})
+        entries.append({"code": wide["code"], "name": wide["name"], "key": short(wide), **coords(wide)})
     for wide, city, dongs in dong_rows:
         # 세종특별자치시처럼 시/도와 시/군/구 이름이 같으면 한 번만 쓴다
         city_name = "" if city["name"] == wide["name"] else city["name"]
@@ -77,12 +80,14 @@ def _crawl_zones() -> list[dict]:
                 "code": city["code"],
                 "name": f"{wide['name']} {city_name}",
                 "key": f"{short(wide)}{city_name}",
+                **coords(city),
             })
         for dong in dongs:
             entries.append({
                 "code": dong["code"],
                 "name": " ".join(filter(None, [wide["name"], city_name, dong["name"]])),
                 "key": f"{short(wide)}{city_name}{dong['name']}",
+                **coords(dong),
             })
     return entries
 
@@ -95,8 +100,10 @@ def load_zones() -> list[dict]:
             return _zones
         if ZONE_CACHE.exists():
             try:
-                _zones = json.loads(ZONE_CACHE.read_text(encoding="utf-8"))
-                return _zones
+                cached = json.loads(ZONE_CACHE.read_text(encoding="utf-8"))
+                if cached and "lat" in cached[0]:  # 좌표 없는 예전 캐시는 다시 받는다
+                    _zones = cached
+                    return _zones
             except (OSError, ValueError):
                 pass  # 깨진 캐시는 무시하고 다시 받는다
         _zones = _crawl_zones()
@@ -193,9 +200,85 @@ def parse_day(html: str, target: date) -> list[dict]:
     return rows
 
 
+# WMO 날씨 코드 → 기상청식 표현 (지난 시간대 보충용)
+def _wmo_sky(code: int) -> str:
+    if code == 0:
+        return "맑음"
+    if code in (1, 2):
+        return "구름많음"
+    if code == 3:
+        return "흐림"
+    if code in (45, 48):
+        return "안개"
+    if code in (71, 73, 75, 77, 85, 86):
+        return "눈"
+    if code in (80, 81, 82):
+        return "소나기"
+    if code >= 95:
+        return "뇌우"
+    return "비"
+
+
+def _slot_datetime(target: date, time: str) -> str:
+    """'09:00' → '2026-10-06T09:00', '24:00' → 다음 날 '00:00'"""
+    hour = int(time[:2])
+    day = target + timedelta(days=1) if hour == 24 else target
+    return f"{day.isoformat()}T{hour % 24:02d}:00"
+
+
+def fetch_past_rows(zone: dict, target: date, times: list[str]) -> list[dict]:
+    """기상청 페이지엔 이미 지난 시간대가 없어서 Open-Meteo 관측/분석값으로 채운다. 실패하면 빈 리스트."""
+    try:
+        resp = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": zone["lat"], "longitude": zone["lon"],
+                "hourly": "temperature_2m,apparent_temperature,weather_code",
+                "timezone": "Asia/Seoul",
+                "start_date": target.isoformat(),
+                "end_date": (target + timedelta(days=1)).isoformat(),
+            },
+            timeout=TIMEOUT,
+        )
+        resp.raise_for_status()
+        hourly = resp.json()["hourly"]
+        index = {t: i for i, t in enumerate(hourly["time"])}
+        rows = []
+        for time in times:
+            i = index.get(_slot_datetime(target, time))
+            if i is None:
+                continue
+            temp, feel, code = (
+                hourly["temperature_2m"][i],
+                hourly["apparent_temperature"][i],
+                hourly["weather_code"][i],
+            )
+            if temp is None or code is None:
+                continue
+            rows.append({
+                "time": time,
+                "sky": _wmo_sky(int(code)),
+                "temp": round(temp),
+                "feel": None if feel is None else round(feel),
+            })
+        return rows
+    except (requests.RequestException, KeyError, ValueError, TypeError):
+        return []
+
+
 def get_day_weather(code: str, target: date) -> list[dict]:
     """code 지역의 target 날짜 날씨. 예보가 없으면 빈 리스트."""
-    return parse_day(fetch_forecast_html(code), target)
+    rows = parse_day(fetch_forecast_html(code), target)
+    if not rows:
+        return rows
+
+    have = {row["time"] for row in rows}
+    missing = [t for t in SHOW_TIMES if t not in have]
+    zone = next((z for z in load_zones() if z["code"] == code), None)
+    if missing and zone and zone.get("lat"):
+        rows += fetch_past_rows(zone, target, missing)
+        rows.sort(key=lambda row: SHOW_TIMES.index(row["time"]))
+    return rows
 
 
 # ---------------------------------------------------------------- 출력 문자열
@@ -206,6 +289,7 @@ def hour_label(time: str) -> str:
 
 def sky_emoji(sky: str) -> str:
     for word, emoji in (
+        ("뇌우", "⛈️"), ("안개", "🌫️"),
         ("눈", "❄️"), ("소나기", "🌦️"), ("비", "🌧️"),
         ("흐", "☁️"), ("구름", "⛅"), ("맑", "☀️"),
     ):
@@ -253,11 +337,11 @@ def clock_label(time: str) -> str:
     return f"{'🌇' if hour < 19 else '🌃'} 오후 {hour - 12}시"
 
 
-def format_graph(rows: list[dict], field: str = "temp", width: int = 10) -> str:
-    """시간대별 값을 막대그래프로 만든다. 디스코드 코드블록(고정폭)에 넣어 쓴다.
+def format_graph(rows: list[dict], field: str = "temp", width: int = 14) -> str:
+    """시간대별 값을 가는 선 막대그래프로 만든다. 디스코드 코드블록(고정폭)에 넣어 쓴다.
 
-    09시 ███░░░░░░░  16℃
-    12시 ███████░░░  21℃
+    09시 ━━━━●           16℃
+    12시 ━━━━━━━━━━━●    21℃
     """
     values = [row[field] for row in rows if row[field] is not None]
     if not values:
@@ -267,14 +351,15 @@ def format_graph(rows: list[dict], field: str = "temp", width: int = 10) -> str:
     lines = []
     for row in rows:
         value = row[field]
+        label = hour_label(row["time"])
         if value is None:
-            lines.append(f"{hour_label(row['time'])} {'-':<{width}}   -")
+            lines.append(f"{label} {'':<{width}}    -")
             continue
-        # 가장 낮은 값도 막대가 조금은 보이도록 최소 2칸
+        # 가장 낮은 값도 막대가 보이도록 최소 3칸
         ratio = 0.5 if high == low else (value - low) / (high - low)
-        filled = 2 + round(ratio * (width - 2))
-        bar = "█" * filled + "░" * (width - filled)
-        lines.append(f"{hour_label(row['time'])} {bar} {value:>3}℃")
+        length = 3 + round(ratio * (width - 3))
+        bar = "━" * (length - 1) + "●"
+        lines.append(f"{label} {bar:<{width}} {value:>3}℃")
     return "\n".join(lines)
 
 
