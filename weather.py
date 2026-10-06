@@ -241,6 +241,43 @@ def format_series(rows: list[dict], field: str) -> str:
     )
 
 
+def clock_label(time: str) -> str:
+    """'09:00' → '🕘 오전 9시', '24:00' → '🌙 밤 12시'"""
+    hour = int(time[:2])
+    if hour == 24:
+        return "🌙 밤 12시"
+    if hour == 12:
+        return "🕛 낮 12시"
+    if hour < 12:
+        return f"🌅 오전 {hour}시"
+    return f"{'🌇' if hour < 19 else '🌃'} 오후 {hour - 12}시"
+
+
+def format_graph(rows: list[dict], field: str = "temp", width: int = 10) -> str:
+    """시간대별 값을 막대그래프로 만든다. 디스코드 코드블록(고정폭)에 넣어 쓴다.
+
+    09시 ███░░░░░░░  16℃
+    12시 ███████░░░  21℃
+    """
+    values = [row[field] for row in rows if row[field] is not None]
+    if not values:
+        return "정보 없음"
+    low, high = min(values), max(values)
+
+    lines = []
+    for row in rows:
+        value = row[field]
+        if value is None:
+            lines.append(f"{hour_label(row['time'])} {'-':<{width}}   -")
+            continue
+        # 가장 낮은 값도 막대가 조금은 보이도록 최소 2칸
+        ratio = 0.5 if high == low else (value - low) / (high - low)
+        filled = 2 + round(ratio * (width - 2))
+        bar = "█" * filled + "░" * (width - filled)
+        lines.append(f"{hour_label(row['time'])} {bar} {value:>3}℃")
+    return "\n".join(lines)
+
+
 def format_weather(name: str, target: date, rows: list[dict]) -> str:
     weekday = "월화수목금토일"[target.weekday()]
     return "\n".join([

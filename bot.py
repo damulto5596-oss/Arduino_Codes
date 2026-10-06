@@ -448,15 +448,43 @@ async def preload_zones():
 
 
 def make_weather_embed(name, day, rows):
-    """하루 날씨를 큰 흐름 / 기온 / 체감온도 3칸 임베드로 만든다."""
+    """시간대별 inline 필드(날씨/기온/체감) + 기온·체감온도 그래프 임베드를 만든다."""
+
+    def degree(value):
+        return "-" if value is None else f"{value}℃"
+
+    temps = [row["temp"] for row in rows if row["temp"] is not None]
+    summary = f"🔺 최고 **{max(temps)}℃**  ·  🔻 최저 **{min(temps)}℃**" if temps else ""
 
     embed = discord.Embed(
         title=f"🌤️ {name} 날씨 · {day_label(day)}",
+        description=f"{summary}\n{weather.format_flow(rows)}",
         color=discord.Color.teal()
     )
-    embed.add_field(name="🌈 날씨 흐름", value=weather.format_flow(rows), inline=False)
-    embed.add_field(name="🌡️ 기온 변화", value=weather.format_series(rows, "temp"), inline=False)
-    embed.add_field(name="🥶 체감온도 변화", value=weather.format_series(rows, "feel"), inline=False)
+
+    # 시간대별 카드 (한 줄에 3개씩)
+    for row in rows:
+        embed.add_field(
+            name=weather.clock_label(row["time"]),
+            value=(
+                f"{weather.sky_emoji(row['sky'])} **{row['sky']}**\n"
+                f"> 🌡️ 기온　{degree(row['temp'])}\n"
+                f"> 🥶 체감　{degree(row['feel'])}"
+            ),
+            inline=True,
+        )
+
+    # 그래프
+    embed.add_field(
+        name="📈 기온 변화",
+        value=f"```\n{weather.format_graph(rows, 'temp')}\n```",
+        inline=False,
+    )
+    embed.add_field(
+        name="📉 체감온도 변화",
+        value=f"```\n{weather.format_graph(rows, 'feel')}\n```",
+        inline=False,
+    )
     embed.set_footer(text="출처: 기상청 날씨누리 · 동네예보 (3시간 간격)")
 
     return embed
