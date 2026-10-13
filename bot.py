@@ -9,6 +9,7 @@ from discord import app_commands
 from dotenv import load_dotenv
 
 import dorm_menu
+import schedule
 import weather
 from main import (
     BASE_DIR, FETCH_COUNT, fetch_contests, get_setting, init_db,
@@ -225,6 +226,7 @@ async def on_ready():
         asyncio.create_task(preload_zones())
         asyncio.create_task(automatic_check())
         asyncio.create_task(automatic_menu())
+        asyncio.create_task(automatic_schedule())
 
 
 @tree.command(
@@ -736,9 +738,139 @@ async def automatic_menu():
             log.exception("자동 날씨 알림 오류")
 
 
+def make_schedule_embed(item, mention=None):
+    """일정 하나를 입력한 정보(일정/날짜/시간)가 모두 보이는 임베드로 만든다."""
+
+    day = datetime.strptime(item["event_date"], "%Y-%m-%d").date()
+
+    embed = discord.Embed(
+        title=f"📅 {item['title']}"[:256],
+        color=discord.Color.purple()
+    )
+    embed.add_field(name="📝 일정", value=item["title"][:1024], inline=False)
+    embed.add_field(name="📆 날짜", value=f"{day:%Y-%m-%d} ({WEEKDAYS[day.weekday()]})", inline=True)
+    embed.add_field(name="⏰ 시간", value=item["event_time"], inline=True)
+    if mention:
+        embed.add_field(name="👤 등록자", value=mention, inline=True)
+
+    return embed
+
+
+@tree.command(
+    name="일정추가",
+    description="일정을 등록합니다. 일정 당일 오전 8시에 이 채널로 알려줍니다.",
+    guild=guild
+)
+@app_commands.describe(
+    일정="일정 내용",
+    일정날짜="예: 2026-10-20 (또는 10-20)",
+    일정시간="예: 14:30"
+)
+async def add_schedule_command(
+    interaction: discord.Interaction, 일정: str, 일정날짜: str, 일정시간: str
+):
+
+    now = datetime.now(KST)
+
+    try:
+        event_date = schedule.parse_date(일정날짜, now.date())
+        event_time = schedule.parse_time(일정시간)
+    except ValueError:
+        # 형식은 맞지만 없는 날짜/시간(예: 2월 30일, 25:00)도 ValueError로 들어온다
+        await interaction.response.send_message(
+            "❌ 날짜는 `2026-10-20` 또는 `10-20`, 시간은 `14:30` 형식으로 입력해 주세요.",
+            ephemeral=True
+        )
+        return
+
+    if datetime.combine(event_date, event_time, tzinfo=KST) < now:
+        await interaction.response.send_message("❌ 이미 지난 일정은 등록할 수 없습니다.", ephemeral=True)
+        return
+
+    schedule.add_schedule(
+        interaction.user.id, interaction.channel_id, 일정, event_date, event_time
+    )
+    log.info(f"일정 추가: {일정} {event_date} {event_time:%H:%M} by {interaction.user}")
+
+    item = {
+        "title": 일정,
+        "event_date": event_date.isoformat(),
+        "event_time": event_time.strftime("%H:%M"),
+    }
+
+    message = "✅ 일정을 등록했습니다."
+    if event_date == now.date():
+        message += "\n⚠️ 오늘 오전 8시는 이미 지나 당일 알림은 보내지 않습니다. (/일정 으로 확인할 수 있어요)"
+    elif event_date > now.date():
+        message += " 당일 오전 8시에 이 채널로 알려드릴게요."
+
+    await interaction.response.send_message(message, embed=make_schedule_embed(item))
+
+
+@tree.command(
+    name="일정",
+    description="내가 등록한 일정 중 남아있는 것을 모두 보여줍니다.",
+    guild=guild
+)
+async def list_schedule_command(interaction: discord.Interaction):
+
+    now = datetime.now(KST)
+    schedule.purge_past(now.date())
+    items = schedule.load_upcoming(interaction.user.id, now)
+
+    if not items:
+        await interaction.response.send_message("📭 남아있는 일정이 없습니다.", ephemeral=True)
+        return
+
+    # 일정당 임베드 하나, 메시지당 최대 10개
+    embeds = [make_schedule_embed(item) for item in items]
+    header = f"🗓️ **{interaction.user.display_name}님의 남은 일정** ({len(items)}개)"
+
+    await interaction.response.send_message(content=header, embeds=embeds[:10])
+    for i in range(10, len(embeds), 10):
+        await interaction.followup.send(embeds=embeds[i:i + 10])
+
+
+async def send_today_schedules():
+    """오늘 날짜의 일정을 각각 등록한 채널로 보내고, 지난 일정은 삭제한다."""
+
+    today = datetime.now(KST).date()
+
+    # 지난 날짜의 일정은 먼저 정리
+    schedule.purge_past(today)
+
+    for item in schedule.load_due(today):
+        try:
+            channel = client.get_channel(item["channel_id"]) or await client.fetch_channel(item["channel_id"])
+            await channel.send(
+                content=f"⏰ <@{item['user_id']}> 오늘의 일정입니다!",
+                embed=make_schedule_embed(item, f"<@{item['user_id']}>"),
+                allowed_mentions=discord.AllowedMentions(users=True)
+            )
+            schedule.mark_notified(item["id"])
+            log.info(f"일정 알림 전송: {item['title']}")
+        except Exception:
+            log.exception(f"일정 알림 전송 오류: {item['id']}")
+
+
+async def automatic_schedule():
+
+    await client.wait_until_ready()
+
+    while not client.is_closed():
+
+        await sleep_until_next(MENU_HOURS, "다음 일정 알림")
+
+        try:
+            await send_today_schedules()
+        except Exception:
+            log.exception("자동 일정 알림 오류")
+
+
 async def main():
 
     init_db()
+    schedule.init_schedule_db()
 
     async with client:
 
