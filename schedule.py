@@ -95,6 +95,53 @@ def load_upcoming(user_id, now):
     return [dict(row) for row in rows]
 
 
+def get_schedule(user_id, schedule_id):
+    """user_id 본인의 일정 하나. 없거나 남의 것이면 None"""
+
+    with db() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT id, user_id, channel_id, title, event_date, event_time
+            FROM schedules
+            WHERE id = ? AND user_id = ?
+            """,
+            (schedule_id, user_id)
+        ).fetchone()
+
+    return dict(row) if row else None
+
+
+def update_schedule(user_id, schedule_id, title, event_date, event_time, channel_id):
+    """일정을 수정한다. 날짜가 바뀌면 새 날짜에 다시 알리도록 알림 여부를 초기화. 수정됐으면 True"""
+
+    with db() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE schedules
+            SET title = ?,
+                notified = CASE WHEN event_date != ? THEN 0 ELSE notified END,
+                event_date = ?,
+                event_time = ?,
+                channel_id = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            (title[:TITLE_MAX], event_date.isoformat(), event_date.isoformat(),
+             event_time.strftime("%H:%M"), channel_id, schedule_id, user_id)
+        )
+        return cursor.rowcount > 0
+
+
+def delete_schedule(user_id, schedule_id):
+    """본인의 일정을 삭제한다. 삭제됐으면 True"""
+
+    with db() as conn:
+        cursor = conn.execute(
+            "DELETE FROM schedules WHERE id = ? AND user_id = ?", (schedule_id, user_id)
+        )
+        return cursor.rowcount > 0
+
+
 def load_due(today):
     """오늘 알림을 보내야 하는데 아직 안 보낸 일정"""
 

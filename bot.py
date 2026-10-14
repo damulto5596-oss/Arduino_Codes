@@ -831,6 +831,123 @@ async def list_schedule_command(interaction: discord.Interaction):
         await interaction.followup.send(embeds=embeds[i:i + 10])
 
 
+async def schedule_autocomplete(interaction: discord.Interaction, current: str):
+    """내 남은 일정을 자동완성 목록으로 보여준다. (값은 일정 id)"""
+
+    items = schedule.load_upcoming(interaction.user.id, datetime.now(KST))
+    choices = []
+
+    for item in items:
+        label = f"{item['event_date']} {item['event_time']} · {item['title']}"
+        if current and current not in label:
+            continue
+        choices.append(app_commands.Choice(name=label[:100], value=str(item["id"])))
+
+    return choices[:25]
+
+
+def find_my_schedule(interaction, target):
+    """자동완성에서 고른 값(id)으로 내 일정을 찾는다. 없으면 None"""
+
+    if not target.isdigit():
+        return None
+    return schedule.get_schedule(interaction.user.id, int(target))
+
+
+@tree.command(
+    name="일정삭제",
+    description="등록한 일정을 선택해서 삭제합니다.",
+    guild=guild
+)
+@app_commands.describe(대상="삭제할 일정")
+@app_commands.autocomplete(대상=schedule_autocomplete)
+async def delete_schedule_command(interaction: discord.Interaction, 대상: str):
+
+    item = find_my_schedule(interaction, 대상)
+    if not item:
+        await interaction.response.send_message(
+            "❌ 일정을 찾을 수 없습니다. 목록에서 선택해 주세요.", ephemeral=True
+        )
+        return
+
+    schedule.delete_schedule(interaction.user.id, item["id"])
+    log.info(f"일정 삭제: {item['title']} {item['event_date']} by {interaction.user}")
+
+    await interaction.response.send_message("🗑️ 일정을 삭제했습니다.", embed=make_schedule_embed(item))
+
+
+@tree.command(
+    name="일정수정",
+    description="등록한 일정을 선택해서 내용을 수정합니다. 바꿀 항목만 입력하세요.",
+    guild=guild
+)
+@app_commands.describe(
+    대상="수정할 일정",
+    일정="새 일정 내용 (생략하면 그대로)",
+    일정날짜="새 날짜 예: 2026-10-20 (생략하면 그대로)",
+    일정시간="새 시간 예: 14:30 (생략하면 그대로)"
+)
+@app_commands.autocomplete(대상=schedule_autocomplete)
+async def edit_schedule_command(
+    interaction: discord.Interaction,
+    대상: str,
+    일정: str = None,
+    일정날짜: str = None,
+    일정시간: str = None
+):
+
+    item = find_my_schedule(interaction, 대상)
+    if not item:
+        await interaction.response.send_message(
+            "❌ 일정을 찾을 수 없습니다. 목록에서 선택해 주세요.", ephemeral=True
+        )
+        return
+
+    if not (일정 or 일정날짜 or 일정시간):
+        await interaction.response.send_message(
+            "❌ 바꿀 항목(일정/일정날짜/일정시간)을 하나 이상 입력해 주세요.", ephemeral=True
+        )
+        return
+
+    now = datetime.now(KST)
+
+    try:
+        event_date = (schedule.parse_date(일정날짜, now.date()) if 일정날짜
+                      else datetime.strptime(item["event_date"], "%Y-%m-%d").date())
+        event_time = (schedule.parse_time(일정시간) if 일정시간
+                      else datetime.strptime(item["event_time"], "%H:%M").time())
+    except ValueError:
+        await interaction.response.send_message(
+            "❌ 날짜는 `2026-10-20` 또는 `10-20`, 시간은 `14:30` 형식으로 입력해 주세요.",
+            ephemeral=True
+        )
+        return
+
+    if datetime.combine(event_date, event_time, tzinfo=KST) < now:
+        await interaction.response.send_message("❌ 이미 지난 시각으로는 수정할 수 없습니다.", ephemeral=True)
+        return
+
+    title = 일정 or item["title"]
+
+    # 알림은 수정한 채널로 보낸다
+    schedule.update_schedule(
+        interaction.user.id, item["id"], title, event_date, event_time, interaction.channel_id
+    )
+    log.info(f"일정 수정: {item['title']} -> {title} {event_date} {event_time:%H:%M} by {interaction.user}")
+
+    updated = {
+        "title": title,
+        "event_date": event_date.isoformat(),
+        "event_time": event_time.strftime("%H:%M"),
+    }
+
+    message = "✏️ 일정을 수정했습니다."
+    if event_date == now.date():
+        message += "\n⚠️ 오늘 오전 8시는 이미 지나 당일 알림은 보내지 않습니다."
+
+    await interaction.response.send_message(message, embed=make_schedule_embed(updated))
+
+
 async def send_today_schedules():
     """오늘 날짜의 일정을 각각 등록한 채널로 보내고, 지난 일정은 삭제한다."""
 
