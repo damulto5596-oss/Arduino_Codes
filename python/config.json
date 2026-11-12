@@ -1,0 +1,11 @@
+{
+  "api_key": "015f95c15987689fbc06258f8097144841629ad11d9dc7f61d1ba0436047b55c",
+  "location": {
+    "city_name": "서울특별시 동작구",
+    "use_lat_lon": true,
+    "latitude": 37.5121,
+    "longitude": 126.9395,
+    "grid_nx": 59,
+    "grid_ny": 126
+  }
+}
