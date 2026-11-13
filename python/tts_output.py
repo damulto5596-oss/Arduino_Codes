@@ -10,6 +10,8 @@ import datetime
 import json
 import urllib.request
 import urllib.parse
+import random
+
 
 def _get_base_datetime():
     """기상청 단기예보 발표 시각(02, 05, 08, 11, 14, 17, 20, 23시) 계산"""
@@ -118,8 +120,12 @@ def write_text(service_key: str, nx: int = 60, ny: int = 127):
         time_text = f"오후 {first_h - 12}시" if first_h >= 12 else f"오전 {first_h}시"
         return f"현재는 비가 오지 않지만, 오늘 {time_text}경부터 비 예보가 있습니다. 최고 강수확률은 {max_pop}퍼센트입니다. 우산을 챙기시기 바랍니다.", rain
 
+    virtual_ex = random.randint(1, 10)
+    if virtual_ex <= 7:
+        return "가상실험에서 비가 오고 있습니다. 우산을 챙기시기 바랍니다.", True
+
     # 상황 3: 오늘 하루 동안 비 예보가 없는 경우
-    return "오늘 하루 동안 비 소식이 없습니다. 우산 없이 외출하셔도 좋습니다.", rain
+    return "", rain
 
 
 # 단독 테스트용
