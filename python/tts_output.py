@@ -12,6 +12,7 @@ import urllib.request
 import urllib.parse
 import random
 
+
 def _get_base_datetime():
     """기상청 단기예보 발표 시각(02, 05, 08, 11, 14, 17, 20, 23시) 계산"""
     now = datetime.datetime.now()
@@ -108,24 +109,22 @@ def write_text(service_key: str, nx: int = 60, ny: int = 127):
     rain_hours.sort()
     rain = is_raining_now or bool(rain_hours)  # 비 예보 여부: 현재 비 또는 오늘 중 예보 있음
 
-    
-
     # --- 우산 안내 텍스트 생성 ---
-        # 상황 1: 지금 당장 비가 오는 경우
+    # 상황 1: 지금 당장 비가 오는 경우
     if is_raining_now:
         return "현재 바깥에 비가 내리고 있습니다. 외출하실 때 우산을 꼭 챙기세요.", rain
-    
-        # 상황 2: 오늘 남은 시간 중 비 예보가 있는 경우
+
+    # 상황 2: 오늘 남은 시간 중 비 예보가 있는 경우
     if rain_hours:
         first_h = rain_hours[0]
         time_text = f"오후 {first_h - 12}시" if first_h >= 12 else f"오전 {first_h}시"
         return f"현재는 비가 오지 않지만, 오늘 {time_text}경부터 비 예보가 있습니다. 최고 강수확률은 {max_pop}퍼센트입니다. 우산을 챙기시기 바랍니다.", rain
-    
-    virtual_ex=random.randint(1, 10)
-    if virtual_ex<=7:
-        return "가상실험에서 비가 오고 있습니다. 우산을 챙기시기 바랍니다.", rain
-    
-        # 상황 3: 오늘 하루 동안 비 예보가 없는 경우
+
+    virtual_ex = random.randint(1, 10)
+    if virtual_ex <= 7:
+        return "가상실험에서 비가 오고 있습니다. 우산을 챙기시기 바랍니다.", True
+
+    # 상황 3: 오늘 하루 동안 비 예보가 없는 경우
     return "", rain
 
 
