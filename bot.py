@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 import dorm_menu
 import schedule
+import virtual_weather
 import weather
 from main import (
     BASE_DIR, FETCH_COUNT, fetch_contests, get_setting, init_db,
@@ -42,10 +43,18 @@ GUILD_ID = int(require_env("GUILD_ID"))
 # /공모전설정, /식단설정으로 채널을 지정하면 그 채널이 우선 사용된다
 CHANNEL_ID = int(os.getenv("CHANNEL_ID") or 0) or None
 
+# 보드(umbrella_alarm)와 같은 기상청 단기예보를 보기 위한 설정.
+# 보드 python/config.json의 api_key / grid_nx / grid_ny와 **같은 값**이어야
+# /가상날씨 결과가 기기와 일치한다. 기본값은 보드의 현재 설정(서울 동작구).
+KMA_API_KEY = os.getenv("KMA_API_KEY")
+KMA_NX = int(os.getenv("KMA_NX") or 59)
+KMA_NY = int(os.getenv("KMA_NY") or 126)
+
 # 자동 알림 채널을 settings 테이블에 저장할 때 쓰는 키
 CONTEST_CHANNEL_KEY = "contest_channel"
 MENU_CHANNEL_KEY = "menu_channel"
 WEATHER_CHANNEL_KEY = "weather_channel"
+VIRTUAL_WEATHER_CHANNEL_KEY = "virtual_weather_channel"
 WEATHER_LOCATION_KEY = "weather_location"  # 아침 알림에 쓸 기상청 지역 코드
 
 # 서버 시간대(보통 UTC)와 상관없이 한국 시간 기준으로 동작
@@ -275,18 +284,25 @@ async def contest(interaction: discord.Interaction):
     await pager.send(interaction)
 
 
+def has_send_permission(channel, guild_me):
+    """봇이 그 채널에 임베드가 들어간 메시지를 보낼 수 있는지"""
+
+    permissions = channel.permissions_for(guild_me)
+    return permissions.view_channel and permissions.send_messages and permissions.embed_links
+
+
+def no_permission_message(channel):
+    return f"❌ 봇이 {channel.mention} 채널에 메시지(임베드)를 보낼 권한이 없습니다. 채널 권한을 확인해 주세요."
+
+
 async def set_alert_channel(interaction, key, channel, label):
     """
     /공모전설정, /식단설정 공통 처리
     """
 
     # 봇이 그 채널에 메시지를 보낼 수 있는지 먼저 확인
-    permissions = channel.permissions_for(interaction.guild.me)
-    if not (permissions.view_channel and permissions.send_messages and permissions.embed_links):
-        await interaction.response.send_message(
-            f"❌ 봇이 {channel.mention} 채널에 메시지(임베드)를 보낼 권한이 없습니다. 채널 권한을 확인해 주세요.",
-            ephemeral=True
-        )
+    if not has_send_permission(channel, interaction.guild.me):
+        await interaction.response.send_message(no_permission_message(channel), ephemeral=True)
         return
 
     set_setting(key, channel.id)
@@ -584,6 +600,113 @@ async def set_weather_location(interaction: discord.Interaction, 위치: str):
 @app_commands.default_permissions(manage_guild=True)
 async def set_weather_channel(interaction: discord.Interaction, 채널이름: discord.TextChannel):
     await set_alert_channel(interaction, WEATHER_CHANNEL_KEY, 채널이름, "날씨")
+
+
+# 실제 예보가 있어 주사위를 쓰지 않은 경우 덧붙이는 설명
+ROLL_UNUSED_NOTE = "\n— 실제 예보가 있어 **이번 판단에는 쓰이지 않았습니다**"
+
+# 가상 날씨가 어떻게 정해졌는지 보여 주는 설명
+VIRTUAL_SOURCE_LABEL = {
+    virtual_weather.SOURCE_REAL_NOW: "실제 예보 — 지금 비가 내리는 중 (가상 추첨까지 가지 않음)",
+    virtual_weather.SOURCE_REAL_FORECAST: "실제 예보 — 오늘 남은 시간에 비 예보 있음 (가상 추첨까지 가지 않음)",
+    virtual_weather.SOURCE_VIRTUAL_RAIN: "가상실험 추첨 — 비 당첨",
+    virtual_weather.SOURCE_CLEAR: "가상실험 추첨 — 비 아님",
+}
+
+
+def make_virtual_weather_embed(result):
+    """오늘의 가상 날씨 임베드. 기기가 실제로 말하는 문장을 그대로 함께 보여 준다."""
+
+    rain = result["rain"]
+
+    embed = discord.Embed(
+        title=f"🧪 오늘의 가상 날씨 — {'🌧️ 비 옴' if rain else '☀️ 비 안 옴'}",
+        color=discord.Color.blue() if rain else discord.Color.gold()
+    )
+    # 실제 비 예보가 있는 날은 추첨까지 가지 않는다. 주사위 값이 판단에 쓰인 것처럼
+    # 보이면 안 되므로 쓰이지 않았다는 것을 명시한다.
+    used_roll = result["source"] in (
+        virtual_weather.SOURCE_VIRTUAL_RAIN, virtual_weather.SOURCE_CLEAR
+    )
+
+    embed.add_field(name="📅 기준 날짜", value=f"{result['date']:%Y-%m-%d} (KST)", inline=True)
+    embed.add_field(
+        name="🎲 가상 추첨",
+        value=f"{result['roll']} / {virtual_weather.VIRTUAL_RAIN_DICE}"
+              f" (≤ {virtual_weather.VIRTUAL_RAIN_THRESHOLD} 이면 비 · 확률 70%)"
+              + ("" if used_roll else ROLL_UNUSED_NOTE),
+        inline=True
+    )
+    embed.add_field(name="🔍 판단 근거", value=VIRTUAL_SOURCE_LABEL[result["source"]], inline=False)
+
+    if result["source"] == virtual_weather.SOURCE_REAL_FORECAST:
+        hours = ", ".join(f"{hour}시" for hour in result["rain_hours"])
+        embed.add_field(
+            name="☔ 비 예보 시간",
+            value=f"{hours} (최고 강수확률 {result['max_pop']}%)",
+            inline=False
+        )
+
+    # 보드는 비가 안 오는 날 빈 문자열을 반환한다 (python/tts_output.py:128)
+    embed.add_field(
+        name="🔊 기기 안내 문장",
+        value=result["text"] or "_(보드는 이 경우 아무 말도 하지 않습니다)_",
+        inline=False
+    )
+    embed.set_footer(
+        text=f"기상청 단기예보 nx={KMA_NX}, ny={KMA_NY} · 우산 알람 기기와 같은 규칙으로 계산"
+    )
+
+    return embed
+
+
+@tree.command(
+    name="가상날씨",
+    description="70% 확률로 정해진 오늘의 가상 날씨를 지정한 채널에 출력합니다.",
+    guild=guild
+)
+@app_commands.describe(채널이름="가상 날씨를 출력할 채널")
+async def virtual_weather_command(interaction: discord.Interaction, 채널이름: discord.TextChannel):
+
+    if not KMA_API_KEY:
+        await interaction.response.send_message(
+            "❌ 기상청 API 키가 없습니다. 서버의 `.env`에 `KMA_API_KEY`를 넣어 주세요. "
+            "(보드 `python/config.json`의 `api_key`와 같은 값이어야 합니다.)",
+            ephemeral=True
+        )
+        return
+
+    if not has_send_permission(채널이름, interaction.guild.me):
+        await interaction.response.send_message(no_permission_message(채널이름), ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        result = await asyncio.to_thread(
+            virtual_weather.describe, KMA_API_KEY, KMA_NX, KMA_NY
+        )
+    except Exception:
+        log.exception("/가상날씨 조회 중 오류")
+        await interaction.followup.send(
+            "❌ 기상청 단기예보를 불러오지 못해 오늘의 가상 날씨를 정하지 못했습니다. "
+            "잠시 후 다시 시도해 주세요.",
+            ephemeral=True
+        )
+        return
+
+    # 다음에 자동으로 보낼 때도 같은 채널을 쓸 수 있게 기억해 둔다
+    set_setting(VIRTUAL_WEATHER_CHANNEL_KEY, 채널이름.id)
+    log.info(
+        f"가상 날씨 출력: #{채널이름.name} ({채널이름.id}) "
+        f"source={result['source']} roll={result['roll']} rain={result['rain']} by {interaction.user}"
+    )
+
+    await 채널이름.send(embed=make_virtual_weather_embed(result))
+    await interaction.followup.send(
+        f"✅ {채널이름.mention} 채널에 오늘의 가상 날씨를 보냈습니다.",
+        ephemeral=True
+    )
 
 
 def next_run_time(now, hours=RUN_HOURS):

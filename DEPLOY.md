@@ -5,10 +5,13 @@
 ## 1. 파일 올리기 (내 PC에서)
 
 ```powershell
-scp -i <키파일> -r bot.py main.py dorm_menu.py requirements.txt .env deploy ubuntu@<서버IP>:~/contest_alert/
+scp -i <키파일> -r bot.py main.py dorm_menu.py schedule.py weather.py virtual_weather.py requirements.txt .env deploy ubuntu@<서버IP>:~/contest_alert/
 ```
 
 `.venv`, `contest.db`, `temp.html`은 올리지 않아도 됩니다. DB는 서버에서 처음 실행할 때 새로 만들어집니다.
+
+`.env`에는 `/가상날씨`가 쓰는 `KMA_API_KEY`도 들어 있어야 합니다. 이 값과 `KMA_NX`/`KMA_NY`는
+우산 알람 보드의 `python/config.json`과 **같아야** 봇과 기기가 같은 날씨를 말합니다.
 
 ## 2. 서버에서 설치
 
