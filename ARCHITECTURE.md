@@ -2,7 +2,7 @@
 
 > 코드를 손볼 때 전체를 다시 읽지 않도록 만든 요약본.
 > **코드를 바꾸면 이 문서도 같이 갱신한다.** 문서와 코드가 다르면 코드가 정답.
-> 마지막 갱신: 2026-11-12
+> 마지막 갱신: 2026-11-14
 
 ## 1. 한 줄 요약
 
@@ -35,6 +35,8 @@ MCU(스케치)가 센서를 읽고, Linux(Python)가 기상청 API로 판단하�
 
 별도 경로 (Python 내부):
   refresh_weather() ─600초마다─> tts_output.write_text() ─> 기상청 API ─> (안내문장, rain_flag)
+                                   └ 실제 비 예보가 없으면 virtual_roll(오늘)로 가상 비 판단(70%)
+                                     날짜 시드라서 600초마다 불러도 하루 안에선 같은 값
   loop() ─0.1초마다─> csv_logger.log_row() ─> python/data/sensor_log.csv
 ```
 
@@ -46,7 +48,8 @@ MCU(스케치)가 센서를 읽고, Linux(Python)가 기상청 API로 판단하�
 | `main.py` | **진입점**. Bridge 핸들러 등록 + 0.1초 루프(CSV 기록, 날씨 갱신 주기 확인) | 동작 |
 | `arduino_speaker.py` | 오케스트레이터. `refresh_weather()`(날씨 갱신), `process_sensor_state()`(판단 전달). 모듈 전역 `weather_text` / `rain_flag` 보유 | 동작 |
 | `alert_logic.py` | 최종 판단. 모듈 전역 `previous_door_open`으로 문 전환 감지. 조건 충족 시 로그 출력 + `True` | 동작 |
-| `tts_output.py` | 기상청 단기예보 API 호출·파싱. `write_text()` → `(안내문장:str, rain:bool)` 튜플 반환 | 동작 |
+| `tts_output.py` | 기상청 단기예보 API 호출·파싱 + 가상 비 추첨. `write_text()` → `(안내문장:str, rain:bool)`. 시각은 **KST 고정**, 가상 추첨은 `virtual_roll()`로 **날짜당 1회 확정** | 동작 |
+| `test_tts_output.py` | `write_text()` 단위 테스트 + `virtual_roll()` 고정값(golden) 테스트. `python -m unittest test_tts_output` | 동작 |
 | `csv_logger.py` | CSV 기록. `update_sensors()` / `update_decision()`로 최신값 캐시 → `log_row()`가 한 줄 추가 | 동작 |
 | `update_location.py` | 지명 → 기상청 격자(nx,ny) 변환 유틸. 대화형 `main()`, 앱 런타임에선 호출 안 됨 | 독립 유틸 |
 | `config.json` | API 키 + 위치(격자 좌표). **실제 기상청 키가 평문으로 들어있음** (사용자가 GitHub 공개 선택) | — |
@@ -135,6 +138,27 @@ docker run --rm --network umbrella_alarm_app_default --entrypoint sh \
 그 폴더에 편집해도 **보드에 전혀 반영되지 않는다**(경고만 뜸).
 → 작업 전 `apps_checkout`으로 받은 **최신 경로**인지 확인. 증상: 고친 코드인데 옛 에러가 계속 남.
 
+### 디스코드 봇과 공유하는 가상 날씨 규칙 (통신 없음)
+
+같은 저장소 `discord` 브랜치의 디스코드 봇에 `/가상날씨` 명령이 있고, 보드와 **같은 날씨**를 말해야 한다.
+두 기기는 서로 통신하지 않는다 — 보드는 공유기 뒤에 있고 WiFi가 자주 끊기며, 봇 서버(Oracle Cloud)는
+인바운드 포트를 열지 않았다. 대신 **날짜를 시드로 같은 주사위를 각자 굴린다.**
+
+| 맞춰야 하는 것 | 보드 | 봇 |
+| :--- | :--- | :--- |
+| 가상 추첨 함수 | `tts_output.virtual_roll()` | `virtual_weather.virtual_roll()` |
+| 시드/확률 상수 | `VIRTUAL_SEED_SALT`, `VIRTUAL_RAIN_THRESHOLD`, `VIRTUAL_RAIN_DICE` | 같은 이름·같은 값 |
+| 비 판단 규칙 | `write_text()` 안의 PTY/POP 루프 | `virtual_weather.judge_rain()` |
+| 기상청 API | `VilageFcstInfoService_2.0` + `urllib` | 같음 (봇도 `requests` 대신 `urllib`) |
+| API 키·격자 | `config.json`의 `api_key`/`grid_nx`/`grid_ny` | `.env`의 `KMA_API_KEY`/`KMA_NX`/`KMA_NY` |
+| 날짜 기준 시간대 | `KST` (고정 +9) | `KST` (`ZoneInfo("Asia/Seoul")`) |
+
+- **한쪽만 고치면 두 기기가 다른 날씨를 말하고, 겉으로는 전혀 티가 나지 않는다.**
+  `test_tts_output.py`의 `VirtualRollTests.GOLDEN`이 그 방어선이다 — 깨지면 봇 쪽도 같이 깨진 것이다.
+- 봇 쪽 값 확인: `discord` 폴더에서 `python virtual_weather.py 2026-11-14`
+- `random` 모듈을 안 쓰는 이유: `random.Random(문자열)`의 시드 변환은 CPython 구현 세부사항이라
+  파이썬 버전이 다르면 같은 값을 보장하지 않는다. 그래서 `hashlib.sha256`을 직접 쓴다.
+
 ### 런타임 생성 파일
 앱이 실행 중 만든 파일(CSV 등)은 체크아웃 미러에 자동으로 안 내려옴 → `apps_checkout` 다시 하면 내려옴.
 
@@ -154,6 +178,9 @@ docker run --rm --network umbrella_alarm_app_default --entrypoint sh \
 3. `link.cpp`의 `onSoundDecision()`이 `playerStart()`를 호출하도록 연결 (현재 Monitor 출력만)
 4. 고아 코드 정리 — `tts_player.py`, `task_processor.py` (옛 pyserial MP3 방식, 프로토콜 불일치)
 5. 낡은 문서 갱신 — `README.md`, `weather.md`
+6. **비 예보 없는 날 `write_text()`가 빈 문자열을 반환** → `arduino_speaker.process_sensor_state()`의
+   `if not weather_text:` 가드에 걸려 "날씨 문장을 먼저 갱신해야 합니다"를 찍고 `False`를 반환한다.
+   결과(알람 안 울림)는 맞지만 경로와 로그가 엉뚱하다. 디스코드 봇은 이 경우를 `clear`로 따로 표시함
 6. 실측 보정 — `FSR_ON/OFF_THRESHOLD`, `DOOR_CLOSED_LEVEL` 극성
 
 ## 9. 검증 안 된 주장

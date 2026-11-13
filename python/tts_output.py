@@ -7,15 +7,39 @@
 """
 
 import datetime
+import hashlib
 import json
 import urllib.request
 import urllib.parse
-import random
+
+# 한국 표준시. 앱이 도커 컨테이너로 돌고 컨테이너 시간대가 UTC인 경우가 있어,
+# "오늘"이 디스코드 봇과 어긋나지 않도록 고정해 둔다. (한국은 DST가 없어 +9가 항상 정확)
+KST = datetime.timezone(datetime.timedelta(hours=9), "KST")
+
+# 가상 비 추첨: 주사위(1~10)가 7 이하면 비 → 70%
+VIRTUAL_RAIN_DICE = 10
+VIRTUAL_RAIN_THRESHOLD = 7
+VIRTUAL_SEED_SALT = "umbrella-virtual"
+
+
+def virtual_roll(day):
+    """날짜만으로 가상 주사위(1~10)를 굴린다. 같은 날이면 어디서 돌려도 같은 값이 나온다.
+
+    디스코드 봇(discord 브랜치)의 virtual_weather.py에 **글자까지 같은 함수**가 있다.
+    보드와 봇은 서로 통신하지 않고 이 함수만으로 같은 "오늘의 가상 날씨"에 도달하므로,
+    한쪽만 고치면 두 기기가 다른 날씨를 말하고 겉으로는 티가 나지 않는다.
+
+    random 모듈을 쓰지 않는 이유: random.Random(문자열)의 시드 변환은 CPython 구현
+    세부사항이라 파이썬 버전이 다르면 같은 값을 보장하지 않는다. 보드(aarch64)와
+    봇 서버(x86_64)는 파이썬 버전이 다를 수 있다.
+    """
+    digest = hashlib.sha256(f"{day.isoformat()}:{VIRTUAL_SEED_SALT}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % VIRTUAL_RAIN_DICE + 1
 
 
 def _get_base_datetime():
     """기상청 단기예보 발표 시각(02, 05, 08, 11, 14, 17, 20, 23시) 계산"""
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(KST)
     cur_mins = now.hour * 60 + now.minute
     slots = [
         ("0200", 2 * 60 + 10),
@@ -68,7 +92,7 @@ def write_text(service_key: str, nx: int = 60, ny: int = 127):
         return f"날씨 정보를 불러오지 못했습니다. 오류: {e}", False
 
     # 오늘 남은 시간대의 비 예보 분석
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(KST)
     today_str = now.strftime("%Y%m%d")
     cur_hour = now.hour
 
@@ -120,8 +144,9 @@ def write_text(service_key: str, nx: int = 60, ny: int = 127):
         time_text = f"오후 {first_h - 12}시" if first_h >= 12 else f"오전 {first_h}시"
         return f"현재는 비가 오지 않지만, 오늘 {time_text}경부터 비 예보가 있습니다. 최고 강수확률은 {max_pop}퍼센트입니다. 우산을 챙기시기 바랍니다.", rain
 
-    virtual_ex = random.randint(1, 10)
-    if virtual_ex <= 7:
+    # 가상실험: 하루에 한 번만 정해지는 값이다. main.py가 600초마다 이 함수를 다시
+    # 불러도 같은 날이면 결과가 바뀌지 않는다.
+    if virtual_roll(now.date()) <= VIRTUAL_RAIN_THRESHOLD:
         return "가상실험에서 비가 오고 있습니다. 우산을 챙기시기 바랍니다.", True
 
     # 상황 3: 오늘 하루 동안 비 예보가 없는 경우
