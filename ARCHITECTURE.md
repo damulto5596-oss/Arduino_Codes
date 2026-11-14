@@ -156,6 +156,9 @@ docker run --rm --network umbrella_alarm_app_default --entrypoint sh \
 - **한쪽만 고치면 두 기기가 다른 날씨를 말하고, 겉으로는 전혀 티가 나지 않는다.**
   `test_tts_output.py`의 `VirtualRollTests.GOLDEN`이 그 방어선이다 — 깨지면 봇 쪽도 같이 깨진 것이다.
 - 봇 쪽 값 확인: `discord` 폴더에서 `python virtual_weather.py 2026-11-14`
+- 2026-11-14 확인: 2026-01-01부터 3,650일 동안 보드와 봇의 `virtual_roll()` 불일치 0건, 가상 비 비율 70.7%.
+- 봇은 `/가상날씨` 실행 시와 매일 08:00 KST에 `비 옴` / `비 옴(가상)` / `비 안 옴` 한 줄만 보낸다
+  (자세한 규칙은 `discord` 브랜치의 `CLAUDE.md`).
 - `random` 모듈을 안 쓰는 이유: `random.Random(문자열)`의 시드 변환은 CPython 구현 세부사항이라
   파이썬 버전이 다르면 같은 값을 보장하지 않는다. 그래서 `hashlib.sha256`을 직접 쓴다.
 
