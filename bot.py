@@ -602,62 +602,13 @@ async def set_weather_channel(interaction: discord.Interaction, 채널이름: di
     await set_alert_channel(interaction, WEATHER_CHANNEL_KEY, 채널이름, "날씨")
 
 
-# 실제 예보가 있어 주사위를 쓰지 않은 경우 덧붙이는 설명
-ROLL_UNUSED_NOTE = "\n— 실제 예보가 있어 **이번 판단에는 쓰이지 않았습니다**"
-
-# 가상 날씨가 어떻게 정해졌는지 보여 주는 설명
-VIRTUAL_SOURCE_LABEL = {
-    virtual_weather.SOURCE_REAL_NOW: "실제 예보 — 지금 비가 내리는 중 (가상 추첨까지 가지 않음)",
-    virtual_weather.SOURCE_REAL_FORECAST: "실제 예보 — 오늘 남은 시간에 비 예보 있음 (가상 추첨까지 가지 않음)",
-    virtual_weather.SOURCE_VIRTUAL_RAIN: "가상실험 추첨 — 비 당첨",
-    virtual_weather.SOURCE_CLEAR: "가상실험 추첨 — 비 아님",
+# 디스코드에 보낼 짧은 가상 날씨 문구 (실제 비 예보가 있으면 "(가상)"을 붙이지 않는다)
+VIRTUAL_WEATHER_TEXT = {
+    virtual_weather.SOURCE_REAL_NOW: "🌧️ 비 옴",
+    virtual_weather.SOURCE_REAL_FORECAST: "🌧️ 비 옴",
+    virtual_weather.SOURCE_VIRTUAL_RAIN: "🌧️ 비 옴(가상)",
+    virtual_weather.SOURCE_CLEAR: "☀️ 비 안 옴",
 }
-
-
-def make_virtual_weather_embed(result):
-    """오늘의 가상 날씨 임베드. 기기가 실제로 말하는 문장을 그대로 함께 보여 준다."""
-
-    rain = result["rain"]
-
-    embed = discord.Embed(
-        title=f"🧪 오늘의 가상 날씨 — {'🌧️ 비 옴' if rain else '☀️ 비 안 옴'}",
-        color=discord.Color.blue() if rain else discord.Color.gold()
-    )
-    # 실제 비 예보가 있는 날은 추첨까지 가지 않는다. 주사위 값이 판단에 쓰인 것처럼
-    # 보이면 안 되므로 쓰이지 않았다는 것을 명시한다.
-    used_roll = result["source"] in (
-        virtual_weather.SOURCE_VIRTUAL_RAIN, virtual_weather.SOURCE_CLEAR
-    )
-
-    embed.add_field(name="📅 기준 날짜", value=f"{result['date']:%Y-%m-%d} (KST)", inline=True)
-    embed.add_field(
-        name="🎲 가상 추첨",
-        value=f"{result['roll']} / {virtual_weather.VIRTUAL_RAIN_DICE}"
-              f" (≤ {virtual_weather.VIRTUAL_RAIN_THRESHOLD} 이면 비 · 확률 70%)"
-              + ("" if used_roll else ROLL_UNUSED_NOTE),
-        inline=True
-    )
-    embed.add_field(name="🔍 판단 근거", value=VIRTUAL_SOURCE_LABEL[result["source"]], inline=False)
-
-    if result["source"] == virtual_weather.SOURCE_REAL_FORECAST:
-        hours = ", ".join(f"{hour}시" for hour in result["rain_hours"])
-        embed.add_field(
-            name="☔ 비 예보 시간",
-            value=f"{hours} (최고 강수확률 {result['max_pop']}%)",
-            inline=False
-        )
-
-    # 보드는 비가 안 오는 날 빈 문자열을 반환한다 (python/tts_output.py:128)
-    embed.add_field(
-        name="🔊 기기 안내 문장",
-        value=result["text"] or "_(보드는 이 경우 아무 말도 하지 않습니다)_",
-        inline=False
-    )
-    embed.set_footer(
-        text=f"기상청 단기예보 nx={KMA_NX}, ny={KMA_NY} · 우산 알람 기기와 같은 규칙으로 계산"
-    )
-
-    return embed
 
 
 @tree.command(
@@ -695,14 +646,14 @@ async def virtual_weather_command(interaction: discord.Interaction, 채널이름
         )
         return
 
-    # 다음에 자동으로 보낼 때도 같은 채널을 쓸 수 있게 기억해 둔다
+    # 매일 아침 자동 알림(send_today_virtual_weather)도 이 채널로 보낸다
     set_setting(VIRTUAL_WEATHER_CHANNEL_KEY, 채널이름.id)
     log.info(
         f"가상 날씨 출력: #{채널이름.name} ({채널이름.id}) "
         f"source={result['source']} roll={result['roll']} rain={result['rain']} by {interaction.user}"
     )
 
-    await 채널이름.send(embed=make_virtual_weather_embed(result))
+    await 채널이름.send(VIRTUAL_WEATHER_TEXT[result["source"]])
     await interaction.followup.send(
         f"✅ {채널이름.mention} 채널에 오늘의 가상 날씨를 보냈습니다.",
         ephemeral=True
@@ -859,6 +810,50 @@ async def automatic_menu():
             await send_today_weather()
         except Exception:
             log.exception("자동 날씨 알림 오류")
+
+        try:
+            await send_today_virtual_weather()
+        except Exception:
+            log.exception("자동 가상 날씨 알림 오류")
+
+
+async def send_today_virtual_weather():
+    """
+    오늘의 가상 날씨를 /가상날씨로 마지막에 지정한 채널에 보낸다.
+    한 번도 지정하지 않았으면 기본 CHANNEL_ID로 보내지 않고 건너뛴다.
+    """
+
+    channel_id = get_setting(VIRTUAL_WEATHER_CHANNEL_KEY)
+    if not channel_id:
+        log.info("가상 날씨 채널이 없어 자동 가상 날씨를 건너뜁니다. /가상날씨로 채널을 지정하세요.")
+        return
+
+    if not KMA_API_KEY:
+        log.warning("KMA_API_KEY가 없어 자동 가상 날씨를 보내지 않습니다.")
+        return
+
+    channel = client.get_channel(int(channel_id))
+    if channel is None:
+        log.warning(f"가상 날씨 채널({channel_id})을 찾을 수 없습니다. /가상날씨로 다시 지정하세요.")
+        return
+
+    for attempt in range(1, MENU_RETRY_COUNT + 1):
+        try:
+            result = await asyncio.to_thread(
+                virtual_weather.describe, KMA_API_KEY, KMA_NX, KMA_NY
+            )
+            break
+        except Exception:
+            log.exception(f"자동 가상 날씨 조회 오류 ({attempt}/{MENU_RETRY_COUNT})")
+            if attempt == MENU_RETRY_COUNT:
+                return
+            await asyncio.sleep(MENU_RETRY_DELAY)
+
+    await channel.send(VIRTUAL_WEATHER_TEXT[result["source"]])
+    log.info(
+        f"자동 가상 날씨 전송: #{channel.name} ({channel.id}) "
+        f"source={result['source']} roll={result['roll']} rain={result['rain']}"
+    )
 
 
 def make_schedule_embed(item, mention=None):
