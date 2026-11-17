@@ -1,7 +1,9 @@
 # 앱 기동 시 /run.sh가 이 파일을 읽어 앱 venv에 자동 설치한다.
 # (.cache/installed_requirements.txt와 비교해 바뀐 경우에만 설치)
 
-# 한국어 TTS — 안내 문장을 MP3로 만든다
+# 한국어 TTS — 안내 문장을 MP3로 만든다.
+# 온라인 서비스라서 인터넷이 필요하다. 한 번 만든 음성은 data/tts_cache/에 저장되어
+# 두 번째부터는 인터넷 없이 재사용된다(tts_player.py 참고).
 gTTS==2.5.4
 
 # ffmpeg 바이너리 동봉 패키지 — 앱 이미지에 ffmpeg가 없어서 필요하다.

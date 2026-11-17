@@ -1,15 +1,22 @@
 """안내 문장을 음성으로 만들어 아두이노(MCU)로 보내 재생시킨다.
 
-흐름: gTTS로 MP3 생성 → ffmpeg로 PCM(8kHz, unsigned 8bit, mono) 변환
-      → Bridge RPC로 MCU에 전송 → MCU가 D5 PWM으로 재생
+흐름: (캐시 확인) → gTTS로 MP3 생성 → ffmpeg로 PCM(8kHz, unsigned 8bit, mono) 변환
+      → 캐시에 저장 → Bridge RPC로 MCU에 전송 → MCU가 D5 PWM으로 재생
+
+캐싱: gTTS는 구글 서버에 접속하는 온라인 TTS라서 인터넷이 끊기면 음성을 못 만든다.
+      한 번 만든 PCM을 파일로 저장해두고 같은 문장이면 재사용하므로,
+      두 번째부터는 **인터넷 없이도** 알림이 울린다.
+      안내 문장 종류가 몇 가지뿐이라 효과가 크다.
 
 주의: 시리얼(pyserial)을 직접 쓰지 않는다. /dev/ttyGS0은 arduino-router-serial
       서비스가 점유하고 있어 직접 열면 충돌한다. 통신은 Bridge만 사용한다.
 """
 
+import hashlib
 import io
 import subprocess
 import threading
+from pathlib import Path
 
 from arduino.app_utils import Bridge
 
@@ -30,10 +37,92 @@ AUDIO_MAX_BYTES = 8000 * 8  # = 64,000바이트 (8초)
 # 임의의 값: ffmpeg 변환 제한 시간(초)
 FFMPEG_TIMEOUT_S = 30
 
+# 만들어둔 PCM을 보관하는 곳. 앱이 재시작되거나 인터넷이 끊겨도 남아 있다
+CACHE_DIR = Path(__file__).resolve().parent / "data" / "tts_cache"
+# 임의의 값: 보관할 음성 파일 수 상한. 상황 2 문장은 시각·확률이 들어가 조금씩 달라지므로
+#            무한히 쌓이지 않게 오래된 것부터 지운다
+CACHE_MAX_FILES = 20
+
 audio_lock = threading.Lock()
 
-# 아두이노에 이미 올려둔 문장. 같은 문장이면 다시 만들지 않는다
+# 아두이노에 이미 올려둔 문장. 같은 문장이면 다시 올리지 않는다
 _prepared_text = None
+
+
+def _cache_path(text):
+    """문장에 대응하는 캐시 파일 경로. 파일명은 해시라서 어떤 문자든 안전하다."""
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+    return CACHE_DIR / f"{digest}.pcm"
+
+
+def _read_cache(path):
+    """캐시된 PCM을 읽는다. 없거나 쓸 수 없는 상태면 None."""
+    try:
+        if not path.exists():
+            return None
+
+        pcm_data = path.read_bytes()
+
+        # 깨진 캐시(0바이트, 또는 버퍼 초과)는 버리고 새로 만든다
+        if not pcm_data or len(pcm_data) > AUDIO_MAX_BYTES:
+            print(f"캐시 무시: 크기가 올바르지 않음 ({len(pcm_data)}바이트)")
+            path.unlink(missing_ok=True)
+            return None
+
+        return pcm_data
+
+    except Exception as error:
+        print(f"캐시 읽기 실패: {error}")
+        return None
+
+
+def _write_cache(path, pcm_data):
+    """PCM을 캐시에 저장한다. 실패해도 재생 자체는 계속되므로 경고만 남긴다.
+
+    같은 이름의 임시 파일에 먼저 쓰고 바꿔치기해서, 도중에 끊겨도 깨진 캐시가 남지 않게 한다.
+    """
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(".pcm.tmp")
+        temp_path.write_bytes(pcm_data)
+        temp_path.replace(path)
+        _prune_cache()
+    except Exception as error:
+        print(f"캐시 저장 실패(재생은 계속): {error}")
+
+
+def _prune_cache():
+    """캐시 파일이 CACHE_MAX_FILES를 넘으면 오래된 것부터 지운다."""
+    try:
+        files = sorted(CACHE_DIR.glob("*.pcm"), key=lambda p: p.stat().st_mtime)
+        for old in files[:-CACHE_MAX_FILES]:
+            old.unlink(missing_ok=True)
+    except Exception as error:
+        print(f"캐시 정리 실패: {error}")
+
+
+def _get_pcm(text):
+    """문장의 PCM을 얻는다 — 캐시에 있으면 그대로, 없으면 만들어서 캐시에 넣는다.
+
+    캐시가 있으면 gTTS를 호출하지 않으므로 인터넷이 필요 없다.
+    """
+    path = _cache_path(text)
+
+    cached = _read_cache(path)
+    if cached:
+        print(f"음성 캐시 사용: {len(cached)}바이트 ({len(cached) / PCM_SAMPLE_RATE:.1f}초)")
+        return cached
+
+    mp3_data = _make_mp3(text)
+    if not mp3_data:
+        return None
+
+    pcm_data = _mp3_to_pcm(mp3_data)
+    if not pcm_data:
+        return None
+
+    _write_cache(path, pcm_data)
+    return pcm_data
 
 
 def _make_mp3(text):
@@ -158,6 +247,7 @@ def prepare_text(text):
     알림 순간에는 request_play()로 재생 신호만 보낸다.
 
     같은 문장은 다시 준비하지 않는다(이미 올려둔 것을 그대로 쓴다).
+    한 번 만든 음성은 캐시에 남으므로, 두 번째부터는 인터넷 없이도 준비된다.
     """
     global _prepared_text
 
@@ -172,11 +262,7 @@ def prepare_text(text):
         return False
 
     try:
-        mp3_data = _make_mp3(text)
-        if not mp3_data:
-            return False
-
-        pcm_data = _mp3_to_pcm(mp3_data)
+        pcm_data = _get_pcm(text)
         if not pcm_data:
             return False
 

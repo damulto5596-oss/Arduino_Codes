@@ -4,3 +4,7 @@ __pycache__/
 .vscode/
 .idea/
 
+# 런타임 생성물 — 저장소에 올릴 필요 없다
+data/tts_cache/
+*.pcm
+

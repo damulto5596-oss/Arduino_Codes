@@ -66,7 +66,7 @@ gTTS 네트워크 호출(1~2초) + 수백 회의 Bridge RPC 때문에 **문이 �
 | `alert_logic.py` | 최종 판단. 모듈 전역 `previous_door_open`으로 문 전환 감지. **반환: 문장(str) 또는 None** | 동작 |
 | `tts_output.py` | 기상청 단기예보 API 호출·파싱. `write_text()` → `(안내문장, rain:bool)`. **비 예보 없음·API 실패 시 안내문장은 빈 문자열**(음성 출력 안 함) | 동작 |
 | `csv_logger.py` | CSV 기록. `update_sensors()`/`update_decision()`로 캐시 → `log_row()` | 동작 |
-| `tts_player.py` | gTTS → PCM → Bridge 전송. `prepare_text()`(미리 올리기) / `request_play()`(즉시 재생 지시) | 동작 |
+| `tts_player.py` | gTTS → PCM → Bridge 전송. `prepare_text()`(미리 올리기) / `request_play()`(즉시 재생 지시). **PCM을 `data/tts_cache/`에 캐싱** | 동작 |
 | `task_processor.py` | `light_text()` 래퍼. **현재 main.py에서 호출하지 않음**(고아) | 미사용 |
 | `update_location.py` | 지명 → 기상청 격자(nx,ny) 변환 유틸. 런타임에선 호출 안 됨 | 독립 유틸 |
 | `config.json` | API 키 + 위치. **실제 기상청 키가 평문** (사용자가 GitHub 공개 선택) | — |
@@ -119,6 +119,23 @@ gTTS 네트워크 호출(1~2초) + 수백 회의 Bridge RPC 때문에 **문이 �
 
 주요 오류: `ERR,PWMINIT`(PWM 초기화 실패 — pinctrl 우회 실패), `ERR,PLAY`(재생 불가),
 `ERR,NOAUDIO`(올려둔 음성 없음), `ERR,BUSY`(수신/재생 중), `ERR,SIZE`(버퍼 초과)
+
+## 4-3. 음성 캐싱 (오프라인 대비)
+
+gTTS는 구글 서버에 접속하는 **온라인 TTS**라서, 인터넷이 끊기면
+`음성 생성 실패(gTTS): Failed to connect`가 나고 음성이 아예 만들어지지 않는다.
+이 보드의 Wi-Fi는 자주 끊기므로(이 프로젝트에서 여러 번 겪음) 캐싱으로 대비한다.
+
+- 위치: `python/data/tts_cache/<sha256앞32자>.pcm` — 문장 해시가 파일명
+- 흐름: `_get_pcm(text)` → 캐시 있으면 그대로 사용(**gTTS 호출 없음 = 인터넷 불필요**),
+  없으면 생성 후 캐시에 저장
+- 손상 방지: 임시 파일에 쓰고 `replace()`로 바꿔치기. 0바이트·버퍼 초과 캐시는 읽을 때 버리고 재생성
+- 상한: `CACHE_MAX_FILES`(20). 상황 2 문장은 시각·확률이 들어가 조금씩 달라지므로
+  오래된 것부터 지운다
+- `.gitignore`에 `data/tts_cache/`를 넣어 저장소에는 올라가지 않게 했다
+
+**한계**: 완전히 새로운 문장은 여전히 인터넷이 필요하다. 오프라인에서도 항상 울려야 한다면
+로컬 TTS(espeak-ng, piper)로 바꿔야 한다.
 
 ## 4-2. 앰프 전원 차단 + 팝 억제
 
@@ -228,6 +245,14 @@ gTTS 한국어 "우산을 챙기세요" → MP3 14,208B → PCM 14,208B = **1.78
 다른 앱/예제를 체크아웃하면 이전 체크아웃 폴더가 **비활성**이 되고,
 그 폴더를 편집해도 **보드에 반영되지 않는다**(경고만 뜸).
 → 작업 전 `apps_checkout`으로 최신 경로 재확인. 증상: 고친 코드인데 옛 에러가 계속 남.
+
+### `time.monotonic()`은 부팅 후 경과다 (실제로 당한 버그)
+컨테이너 안에서도 `time.monotonic()`은 **시스템 부팅 후 경과 초**를 돌려준다(앱 시작 기준이 아니다).
+그래서 `_last_weather_refresh = 0.0`으로 초기화하고 `now - 0.0 >= 600`으로 비교하면,
+**부팅 10분 안에 앱을 실행한 경우 첫 날씨 갱신이 통째로 건너뛰어진다.**
+→ `weather_text`가 비어 있어 음성 준비도 안 되고 알림이 영영 울리지 않는다.
+→ 보드가 오래 켜져 있을 때만 우연히 동작하므로 재현이 들쭉날쭉하다.
+현재는 `None`을 "아직 갱신 안 함" 센티널로 써서 첫 호출을 보장한다.
 
 ### 런타임 생성 파일
 앱이 실행 중 만든 파일(CSV 등)은 체크아웃 미러에 자동으로 안 내려옴 → `apps_checkout` 다시 하면 내려옴.

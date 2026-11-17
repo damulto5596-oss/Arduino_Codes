@@ -10,7 +10,11 @@ import tts_player
 WEATHER_REFRESH_INTERVAL_S = 600  # 임의의 값: 10분마다 날씨 재조회
 CSV_LOG_INTERVAL_S = 0.1  # CSV 수집 간격
 
-_last_weather_refresh = 0.0
+# None = 아직 한 번도 갱신하지 않음.
+# 0.0으로 두면 안 된다 — time.monotonic()은 "앱 시작 후"가 아니라 "시스템 부팅 후" 경과라서,
+# 부팅 10분 안에 앱을 실행하면 (monotonic - 0.0 >= 600)이 거짓이 되어 첫 갱신이 통째로 건너뛰어진다.
+# 그러면 weather_text가 비어 있어 음성 준비도 안 되고, 알림이 영영 울리지 않는다.
+_last_weather_refresh = None
 
 
 def _on_state(values):
@@ -56,9 +60,13 @@ def loop():
     global _last_weather_refresh
 
     now = time.monotonic()
-    if now - _last_weather_refresh >= WEATHER_REFRESH_INTERVAL_S:
-        refresh_weather()
+    if _last_weather_refresh is None or now - _last_weather_refresh >= WEATHER_REFRESH_INTERVAL_S:
+        # 시각을 먼저 기록한다 — 갱신이 실패했을 때 0.1초마다 API를 두드리지 않도록
         _last_weather_refresh = now
+        try:
+            refresh_weather()
+        except Exception as error:
+            print(f"날씨 갱신 실패(다음 주기에 재시도): {error}")
 
     # 알림이 울리기 전에 음성을 미리 만들어 아두이노에 올려둔다.
     # 수 초가 걸릴 수 있어 그 동안 CSV 간격이 늘어지지만, 문장이 바뀔 때만 1회 수행된다.
