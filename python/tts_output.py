@@ -7,33 +7,64 @@
 """
 
 import datetime
+import hashlib
 import json
 import urllib.request
 import urllib.parse
-import random
 
 # ── 테스트 스위치 ─────────────────────────────────────────────────────────────
 # 0: 실제 운용 — 기상청 예보로만 판정
 # 1: API를 건너뛰고 항상 "비 옴"으로 처리 (인터넷·API 키 없어도 됨)
-# 2: 실제 비 예보 OR 가상 비(1~10 난수가 VIRTUAL_RAIN_THRESHOLD 이하, 기본 70%)
-#    둘 중 하나만 참이어도 비로 판정해 안내한다
+# 2: 실제 비 예보 OR 가상 비(1~10 주사위가 VIRTUAL_RAIN_THRESHOLD 이하, 기본 70%)
+#    둘 중 하나만 참이어도 비로 판정해 안내한다.
+#    가상 비는 매일 VIRTUAL_RESET_HOUR(05시, KST)에 한 번 바뀌고 그 사이에는 고정이다.
 # 실제 운용 시에는 반드시 0으로 되돌릴 것.
 # 주의: 이것만으로 소리가 나지는 않는다. 나머지 두 조건은 물리적으로 만들어야 한다
 #       ① 자기센서를 닫힘 → 열림으로 바꾸기  ② FSR을 눌러 우산 있음 상태 만들기
-FORCE_RAIN_FOR_TEST = 0
+FORCE_RAIN_FOR_TEST = 2
+
+# 가상 비 추첨: 주사위(1~10)가 7 이하면 비 → 70%
+# 디스코드 봇(discord 브랜치 virtual_weather.py)과 같은 이름·같은 값이어야 같은 날씨가 나온다
+VIRTUAL_RAIN_DICE = 10
 VIRTUAL_RAIN_THRESHOLD = 7
+VIRTUAL_SEED_SALT = "umbrella-virtual"
+
+# 가상 날씨가 바뀌는 시각(KST). 05시 이전은 "전날"의 가상 날씨를 그대로 쓴다
+VIRTUAL_RESET_HOUR = 5
+
+# 한국 표준시. 앱이 도커 컨테이너(UTC일 수 있음)에서 돌아도 05시가 한국 시각 기준이 되도록 고정
+KST = datetime.timezone(datetime.timedelta(hours=9), "KST")
 
 # 강제/가상 비일 때 읽어 줄 안내 문장
 RAIN_EXPECTED_TEXT = "비가 올 예정입니다. 우산을 챙겨가세요."
 
 
+def virtual_roll(day):
+    """날짜만으로 가상 주사위(1~10)를 굴린다. 같은 날짜면 언제 불러도 같은 값이다.
+
+    디스코드 봇의 virtual_weather.virtual_roll()과 글자까지 같은 함수다.
+    random 모듈은 파이썬 버전마다 시드 변환이 달라질 수 있어 hashlib을 직접 쓴다.
+    """
+    digest = hashlib.sha256(f"{day.isoformat()}:{VIRTUAL_SEED_SALT}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % VIRTUAL_RAIN_DICE + 1
+
+
+def virtual_day(now=None):
+    """가상 날씨에 쓸 '날짜'. 05시(KST)를 하루의 시작으로 본다.
+    예) 11/19 04:59 → 11/18,  11/19 05:00 → 11/19"""
+    now = now or datetime.datetime.now(KST)
+    return (now - datetime.timedelta(hours=VIRTUAL_RESET_HOUR)).date()
+
+
 def _virtual_rain():
-    """모드 2일 때 난수로 가상 비 여부를 정한다. 다른 모드에서는 항상 False"""
+    """모드 2일 때 오늘(05시 기준)의 가상 비 여부. 다른 모드에서는 항상 False.
+    main.py가 600초마다 불러도 05시가 지나기 전에는 결과가 바뀌지 않는다."""
     if FORCE_RAIN_FOR_TEST != 2:
         return False
-    virtual_ex = random.randint(1, 10)
-    hit = virtual_ex <= VIRTUAL_RAIN_THRESHOLD
-    print(f"[테스트] FORCE_RAIN_FOR_TEST=2 — 난수 {virtual_ex} → 가상 비 {'예' if hit else '아니오'}")
+    day = virtual_day()
+    roll = virtual_roll(day)
+    hit = roll <= VIRTUAL_RAIN_THRESHOLD
+    print(f"[테스트] FORCE_RAIN_FOR_TEST=2 — {day} 주사위 {roll} → 가상 비 {'예' if hit else '아니오'}")
     return hit
 
 
