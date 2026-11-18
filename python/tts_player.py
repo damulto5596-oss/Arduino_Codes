@@ -37,6 +37,15 @@ AUDIO_MAX_BYTES = 8000 * 8  # = 64,000바이트 (8초)
 # 임의의 값: ffmpeg 변환 제한 시간(초)
 FFMPEG_TIMEOUT_S = 30
 
+# 음량 보정 필터 (ffmpeg -af). gTTS 음성은 진폭이 작아서 0~255 범위를 다 쓰지 못하는데,
+# PWM 듀티가 그만큼 덜 흔들려 소리가 작게 들린다. 여기서 진폭을 끌어올려 범위를 채운다.
+#   speechnorm : 음성 전용 정규화. 압축기 특유의 출렁임 없이 작은 구간을 끌어올린다
+#     e(expansion)=50이 최대 증폭 배수, l=1이면 피크를 한계까지 올린다
+#   alimiter   : 클리핑 방지용 리미터. 0.95까지만 허용해 찌그러짐을 막는다
+# 임의의 값: 너무 키우면 찌그러지고 노이즈도 같이 커진다. 들어보고 e= 값을 조정할 것.
+#            빈 문자열("")로 두면 보정을 끈다.
+PCM_GAIN_FILTER = "speechnorm=e=12.5:r=0.0001:l=1,alimiter=limit=0.95"
+
 # 만들어둔 PCM을 보관하는 곳. 앱이 재시작되거나 인터넷이 끊겨도 남아 있다
 CACHE_DIR = Path(__file__).resolve().parent / "data" / "tts_cache"
 # 임의의 값: 보관할 음성 파일 수 상한. 상황 2 문장은 시각·확률이 들어가 조금씩 달라지므로
@@ -50,8 +59,13 @@ _prepared_text = None
 
 
 def _cache_path(text):
-    """문장에 대응하는 캐시 파일 경로. 파일명은 해시라서 어떤 문자든 안전하다."""
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+    """문장에 대응하는 캐시 파일 경로. 파일명은 해시라서 어떤 문자든 안전하다.
+
+    해시에 음량 필터와 샘플레이트까지 섞는다 — 그래야 설정을 바꿨을 때
+    옛 캐시(옛 음량)가 재사용되지 않고 새로 만들어진다.
+    """
+    key = f"{text}|{PCM_GAIN_FILTER}|{PCM_SAMPLE_RATE}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
     return CACHE_DIR / f"{digest}.pcm"
 
 
@@ -169,6 +183,12 @@ def _mp3_to_pcm(mp3_data):
         ffmpeg,
         "-hide_banner", "-loglevel", "error",
         "-i", "pipe:0",          # 입력: stdin의 MP3
+    ]
+
+    if PCM_GAIN_FILTER:
+        command += ["-af", PCM_GAIN_FILTER]  # 음량 보정 (리샘플링 전에 적용)
+
+    command += [
         "-ar", str(PCM_SAMPLE_RATE),
         "-ac", "1",              # 모노
         "-f", "u8",              # unsigned 8bit raw
